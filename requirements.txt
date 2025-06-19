@@ -1,0 +1,12 @@
+# 用于本地高性能IPC通信
+pyzmq
+
+# 用于高效的二进制元数据序列化
+msgspec
+
+# 用于在后台跟踪工作流状态并进行清理
+websockets
+
+# 用于处理EXR文件中的多通道数据和Cryptomatte
+openexr
+numpy 
