@@ -6,6 +6,7 @@ import msgspec
 import time
 import os
 import folder_paths
+import uuid
 
 # --- 全局状态 (交互模式) ---
 # 这个字典将为"交互模式"保存从 Blender 接收到的最新数据。
@@ -39,7 +40,7 @@ def sanitize_filename(filename):
 
 def zmq_server_worker():
     """
-    在后台线程中运行，使用多部分消息协议监听来自 Blender 的请求，并根据请求类型进行路由。
+    在后台线程中运行，使用多部分消息协议监听来自 Blender 的请求。
     """
     context = zmq.Context()
     socket = context.socket(zmq.REP)
@@ -50,76 +51,76 @@ def zmq_server_worker():
     decoder = msgspec.msgpack.Decoder()
     encoder = msgspec.msgpack.Encoder()
 
-    while True:
-        try:
-            # 阻塞并等待来自 Blender 的多部分消息
-            parts = socket.recv_multipart()
-            
-            # 第一部分是元数据
-            metadata = decoder.decode(parts[0])
-            print(f"[BlenderBridge] 收到请求, 元数据: {metadata.get('type', 'N/A')}")
-
-            request_type = metadata.get("type")
-
-            # --- 请求路由 ---
-            if request_type == "ping":
-                # 1. 处理 Ping 请求 (握手)
-                print("[BlenderBridge] 收到 Ping 请求，正在回复 Pong...")
-                reply = {"status": "ok", "message": "pong"}
-                socket.send(encoder.encode(reply))
-                continue
-
-            # --- 交互模式 ---
-            # 移除了自动模式，所有非 ping 请求都被视为交互式数据。
-            print("[BlenderBridge] 检测到交互模式数据。")
-            
-            if len(parts) < 2:
-                raise ValueError("交互模式请求需要元数据和图像数据部分。")
-            
-            # 第二部分是图像数据
-            image_data = parts[1]
-            original_filename = sanitize_filename(metadata.get("filename", "image.png"))
-            
-            # 将图像保存到 ComfyUI 的临时目录
-            temp_dir = get_comfy_temp_directory()
-            temp_path = os.path.join(temp_dir, f"{uuid.uuid4()}_{original_filename}")
-            
-            with open(temp_path, "wb") as f:
-                f.write(image_data)
-            
-            print(f"[BlenderBridge] 交互式图像已保存到临时文件: {temp_path}")
-            
-            # 准备要传递给 DataHub 节点的数据
-            file_info = {
-                "path": temp_path,
-                "type": metadata.get("render_type", "render"), # 'multilayer_exr', 'image', etc.
-                "original_name": original_filename,
-            }
-
-            # 更新全局状态，以便 Receiver 节点可以获取
-            with LATEST_DATA["lock"]:
-                LATEST_DATA["files"] = [file_info]
-                LATEST_DATA["metadata"] = metadata
-                LATEST_DATA["return_info"] = metadata.get("return_info")
-
-            # 发出新数据可用的信号
-            NEW_DATA_EVENT.set()
-            
-            reply = {"status": "ok", "message": "Interactive data received."}
-            socket.send(encoder.encode(reply))
-
-        except Exception as e:
-            print(f"[BlenderBridge] 服务器在处理请求时遇到错误: {e}")
-            # 即使有错误，也尝试向Blender发送一个回复，以防止其卡在等待状态
+    try:
+        while True:
             try:
-                error_reply = {"status": "error", "message": str(e)}
-                socket.send(encoder.encode(error_reply))
-            except Exception as send_e:
-                print(f"[BlenderBridge] 无法发送错误回复给 Blender: {send_e}")
-        finally:
-            print("[BlenderBridge] 正在关闭 ZeroMQ 服务器...")
-            socket.close()
-            context.term()
+                # 阻塞并等待来自 Blender 的多部分消息
+                parts = socket.recv_multipart()
+                
+                # 第一部分是元数据
+                metadata = decoder.decode(parts[0])
+                print(f"[BlenderBridge] 收到请求, 元数据: {metadata.get('type', 'N/A')}")
+
+                request_type = metadata.get("type")
+
+                # 1. 处理 Ping 请求 (握手)
+                if request_type == "ping":
+                    print("[BlenderBridge] 收到 Ping 请求，正在回复 Pong...")
+                    reply = {"status": "ok", "message": "pong"}
+                    socket.send(encoder.encode(reply))
+                    continue
+
+                # --- 交互模式 ---
+                # 所有非 ping 请求都被视为交互式数据。
+                print("[BlenderBridge] 检测到交互模式数据。")
+                
+                if len(parts) < 2:
+                    raise ValueError("交互模式请求需要元数据和图像数据部分。")
+                
+                # 第二部分是图像数据
+                image_data = parts[1]
+                original_filename = sanitize_filename(metadata.get("filename", "image.png"))
+                
+                # 将图像保存到 ComfyUI 的临时目录
+                temp_dir = get_comfy_temp_directory()
+                temp_path = os.path.join(temp_dir, f"{uuid.uuid4()}_{original_filename}")
+                
+                with open(temp_path, "wb") as f:
+                    f.write(image_data)
+                
+                print(f"[BlenderBridge] 交互式图像已保存到临时文件: {temp_path}")
+                
+                # 准备要传递给 DataHub 节点的数据
+                file_info = {
+                    "path": temp_path,
+                    "type": metadata.get("render_type", "render"), # 'multilayer_exr', 'image', etc.
+                    "original_name": original_filename,
+                }
+
+                # 更新全局状态，以便 Receiver 节点可以获取
+                with LATEST_DATA["lock"]:
+                    LATEST_DATA["files"] = [file_info]
+                    LATEST_DATA["metadata"] = metadata
+                    LATEST_DATA["return_info"] = metadata.get("return_info")
+
+                # 发出新数据可用的信号
+                NEW_DATA_EVENT.set()
+                
+                reply = {"status": "ok", "message": "Interactive data received."}
+                socket.send(encoder.encode(reply))
+
+            except Exception as e:
+                print(f"[BlenderBridge] 服务器在处理请求时遇到错误: {e}")
+                # 即使有错误，也尝试向Blender发送一个回复，以防止其卡在等待状态
+                try:
+                    error_reply = {"status": "error", "message": str(e)}
+                    socket.send(encoder.encode(error_reply))
+                except Exception as send_e:
+                    print(f"[BlenderBridge] 无法发送错误回复给 Blender: {send_e}")
+    finally:
+        print("[BlenderBridge] 正在关闭 ZeroMQ 服务器...")
+        socket.close()
+        context.term()
 
 def start_server_thread():
     """启动 ZMQ 服务器线程（如果尚未运行）。"""
